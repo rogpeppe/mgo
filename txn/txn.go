@@ -444,8 +444,7 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 	if err := iter.Close(); err != nil {
 		return fmt.Errorf("transaction stash iteration error: %v", err)
 	}
-
-	return nil
+	return iter.Close()
 }
 
 func (r *Runner) load(id bson.ObjectId) (*transaction, error) {
