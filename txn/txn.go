@@ -424,7 +424,7 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 			logf("WARNING: purging from document %s/%v the missing transaction ids %v", collection, tdoc.DocId, idsList)
 			err := c.UpdateId(tdoc.DocId, M{"$pull": M{"txn-queue": M{"$in": idsList}}})
 			if err != nil {
-				return fmt.Errorf("error purging missing transaction %s: %v", txnId.Hex(), err)
+				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
 			}
 		}
 		if err := iter.Close(); err != nil {
