@@ -428,8 +428,8 @@ func (s *S) TestChangeLog(c *C) {
 
 	type IdList []interface{}
 	type Log struct {
-		Docs   IdList  "d"
-		Revnos []int64 "r"
+		Docs   IdList  `bson:"d"`
+		Revnos []int64 `bson:"r"`
 	}
 	var m map[string]*Log
 	err = chglog.FindId(id).One(&m)
@@ -554,7 +554,7 @@ func (s *S) TestPurgeMissing(c *C) {
 		err = s.accounts.FindId(want.Id).One(&got)
 		if want.Balance == -1 {
 			if err != mgo.ErrNotFound {
-				c.Errorf("Account %d should not exist, find got err=%#v", err)
+				c.Errorf("Account %d should not exist, find got err=%#v", want.Id, err)
 			}
 		} else if err != nil {
 			c.Errorf("Account %d should have balance of %d, but wasn't found", want.Id, want.Balance)

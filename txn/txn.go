@@ -386,30 +386,65 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 	type TDoc struct {
 		Id       interface{} "_id"
 		TxnQueue []string    "txn-queue"
+ions
 	}
 
 	found := make(map[bson.ObjectId]bool)
 
 	sort.Strings(collections)
 	for _, collection := range collections {
+		logf("collection %s", collection)
 		c := r.tc.Database.C(collection)
 		iter := c.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
 		var tdoc TDoc
 		for iter.Next(&tdoc) {
-			for _, txnToken := range tdoc.TxnQueue {
-				txnId := bson.ObjectIdHex(txnToken[:24])
-				if found[txnId] {
+			idsToRemove := make(map[string]bool)
+			if len(tdoc.TxnQueue) == 0 {
+				continue
+			}
+			countToKeep := 0
+			countAppliedAborted := 0
+			logf("%s/%v: %d txn ids", collection, tdoc.Id, len(tdoc.TxnQueue))
+			for _, fullTxnId := range tdoc.TxnQueue {
+				txnId := bson.ObjectIdHex(fullTxnId[:24])
+				isFound, ok := found[txnId]
+				if !ok {
+					var txnDoc transaction
+					err := r.tc.FindId(txnId).Select(bson.D{{"_id", 1}, {"s", 1}}).One(&txnDoc)
+					if err != nil {
+						isFound = false
+					} else {
+						isFound = txnDoc.State != taborted && txnDoc.State != tapplied
+						if !isFound {
+							countAppliedAborted++
+						}
+					}
+					found[txnId] = isFound
+				}
+				if isFound {
+					countToKeep++
 					continue
 				}
-				if r.tc.FindId(txnId).One(nil) == nil {
-					found[txnId] = true
-					continue
-				}
-				logf("WARNING: purging from document %s/%v the missing transaction id %s", collection, tdoc.Id, txnId)
-				err := c.UpdateId(tdoc.Id, M{"$pull": M{"txn-queue": M{"$regex": "^" + txnId.Hex() + "_*"}}})
-				if err != nil {
-					return fmt.Errorf("error purging missing transaction %s: %v", txnId.Hex(), err)
-				}
+				// We queue the full TXN id not just the prefix.
+				idsToRemove[fullTxnId] = true
+			}
+			if len(idsToRemove) == 0 {
+				continue
+			}
+			idsList := make([]string, 0, len(idsToRemove))
+			for fullTxnId, _ := range idsToRemove {
+				idsList = append(idsList, fullTxnId)
+			}
+			var info string
+			if len(idsList) < 5 {
+				info = fmt.Sprintf("the missing transaction ids %v", idsList)
+			} else {
+				info = fmt.Sprintf("%d missing transaction ids", len(idsList))
+			}
+			logf("WARNING: purging from document %s/%v %s (%d applied or aborted, keeping %d pending)", collection, tdoc.Id, info, countAppliedAborted, countToKeep)
+			err := c.UpdateId(tdoc.Id, M{"$pullAll": M{"txn-queue": idsList}})
+			if err != nil {
+				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
 			}
 		}
 		if err := iter.Close(); err != nil {
