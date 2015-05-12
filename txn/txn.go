@@ -421,7 +421,13 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 			for fullTxnId, _ := range idsToRemove {
 				idsList = append(idsList, fullTxnId)
 			}
-			logf("WARNING: purging from document %s/%v the missing transaction ids %v", collection, tdoc.DocId, idsList)
+			var info string
+			if len(idsList) < 5 {
+				info = fmt.Sprintf("the missing transaction ids %v", idsList)
+			} else {
+				info = fmt.Sprintf("%d missing transaction ids", len(idsList))
+			}
+			logf("WARNING: purging from document %s/%v %s", collection, tdoc.DocId, info)
 			err := c.UpdateId(tdoc.DocId, M{"$pull": M{"txn-queue": M{"$in": idsList}}})
 			if err != nil {
 				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
