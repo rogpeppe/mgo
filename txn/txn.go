@@ -399,14 +399,17 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 		var tdoc TDoc
 		for iter.Next(&tdoc) {
 			idsToRemove := make(map[string]bool)
+			countToKeep := 0
 			for _, fullTxnId := range tdoc.TxnIds {
 				txnId := bson.ObjectIdHex(fullTxnId[:24])
 				if found[txnId] {
+					countToKeep++
 					continue
 				}
 				if !knownMissing[txnId] {
 					if r.tc.FindId(txnId).One(nil) == nil {
 						found[txnId] = true
+						countToKeep++
 						continue
 					}
 					knownMissing[txnId] = true
@@ -427,7 +430,7 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 			} else {
 				info = fmt.Sprintf("%d missing transaction ids", len(idsList))
 			}
-			logf("WARNING: purging from document %s/%v %s", collection, tdoc.DocId, info)
+			logf("WARNING: purging from document %s/%v %s (keeping %d pending)", collection, tdoc.DocId, info, countToKeep)
 			err := c.UpdateId(tdoc.DocId, M{"$pull": M{"txn-queue": M{"$in": idsList}}})
 			if err != nil {
 				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
