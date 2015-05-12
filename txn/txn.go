@@ -389,6 +389,7 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 	}
 
 	found := make(map[bson.ObjectId]bool)
+	knownMissing := make(map[bson.ObjectId]bool)
 	colls := make(map[string]bool)
 
 	sort.Strings(collections)
@@ -397,20 +398,42 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 		iter := c.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
 		var tdoc TDoc
 		for iter.Next(&tdoc) {
+			idsToRemove := make(map[string]bool)
+			countToKeep := 0
 			for _, fullTxnId := range tdoc.TxnIds {
 				txnId := bson.ObjectIdHex(fullTxnId[:24])
 				if found[txnId] {
+					countToKeep++
 					continue
 				}
-				if r.tc.FindId(txnId).One(nil) == nil {
-					found[txnId] = true
-					continue
+				if !knownMissing[txnId] {
+					if r.tc.FindId(txnId).One(nil) == nil {
+						found[txnId] = true
+						countToKeep++
+						continue
+					}
+					knownMissing[txnId] = true
 				}
-				logf("WARNING: purging from document %s/%v the missing transaction id %s", collection, tdoc.DocId, txnId)
-				err := c.UpdateId(tdoc.DocId, M{"$pull": M{"txn-queue": M{"$regex": "^" + txnId.Hex() + "_*"}}})
-				if err != nil {
-					return fmt.Errorf("error purging missing transaction %s: %v", txnId.Hex(), err)
-				}
+				// We queue the full TXN id not just the prefix.
+				idsToRemove[fullTxnId] = true
+			}
+			if len(idsToRemove) == 0 {
+				continue
+			}
+			idsList := make([]string, 0, len(idsToRemove))
+			for fullTxnId, _ := range idsToRemove {
+				idsList = append(idsList, fullTxnId)
+			}
+			var info string
+			if len(idsList) < 5 {
+				info = fmt.Sprintf("the missing transaction ids %v", idsList)
+			} else {
+				info = fmt.Sprintf("%d missing transaction ids", len(idsList))
+			}
+			logf("WARNING: purging from document %s/%v %s (keeping %d pending)", collection, tdoc.DocId, info, countToKeep)
+			err := c.UpdateId(tdoc.DocId, M{"$pull": M{"txn-queue": M{"$in": idsList}}})
+			if err != nil {
+				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
 			}
 		}
 		if err := iter.Close(); err != nil {
