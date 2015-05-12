@@ -381,70 +381,39 @@ func (r *Runner) ChangeLog(logc *mgo.Collection) {
 // a system that has seen unavoidable corruption back in a working state.
 func (r *Runner) PurgeMissing(collections ...string) error {
 	type M map[string]interface{}
-	type S []interface{}
 
 	type TDoc struct {
 		DocId  interface{} `bson:"_id"`
 		TxnIds []string    `bson:"txn-queue"`
 	}
 
-	found := make(map[bson.ObjectId]bool)
+	cache := newTxnsCache(r.tc)
 	colls := make(map[string]bool)
 
+	var idsToRemove []string
 	sort.Strings(collections)
 	for _, collection := range collections {
 		logf("collection %s", collection)
 		c := r.tc.Database.C(collection)
-		iter := c.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
+		iter := c.Find(nil).Select(M{"_id": 1, "txn-queue": 1}).Iter()
 		var tdoc TDoc
 		for iter.Next(&tdoc) {
-			idsToRemove := make(map[string]bool)
-			if len(tdoc.TxnIds) == 0 {
-				continue
-			}
+			idsToRemove = idsToRemove[:0]
 			countToKeep := 0
-			countAppliedAborted := 0
-			logf("%s/%v: %d txn ids", collection, tdoc.DocId, len(tdoc.TxnIds))
 			for _, fullTxnId := range tdoc.TxnIds {
-				txnId := bson.ObjectIdHex(fullTxnId[:24])
-				isFound, ok := found[txnId]
-				if !ok {
-					var txnDoc transaction
-					err := r.tc.FindId(txnId).Select(bson.D{{"_id", 1}, {"s", 1}}).One(&txnDoc)
-					if err != nil {
-						isFound = false
-					} else {
-						isFound = txnDoc.State != taborted && txnDoc.State != tapplied
-						if !isFound {
-							countAppliedAborted++
-						}
-					}
-					found[txnId] = isFound
-				}
-				if isFound {
+				if cache.isPending(fullTxnId) {
 					countToKeep++
-					continue
+				} else {
+					idsToRemove = append(idsToRemove, fullTxnId)
 				}
-				// We queue the full TXN id not just the prefix.
-				idsToRemove[fullTxnId] = true
 			}
 			if len(idsToRemove) == 0 {
 				continue
 			}
-			idsList := make([]string, 0, len(idsToRemove))
-			for fullTxnId, _ := range idsToRemove {
-				idsList = append(idsList, fullTxnId)
-			}
-			var info string
-			if len(idsList) < 5 {
-				info = fmt.Sprintf("the missing transaction ids %v", idsList)
-			} else {
-				info = fmt.Sprintf("%d missing transaction ids", len(idsList))
-			}
-			logf("WARNING: purging from document %s/%v %s (%d applied or aborted, keeping %d pending)", collection, tdoc.DocId, info, countAppliedAborted, countToKeep)
-			err := c.UpdateId(tdoc.DocId, M{"$pullAll": M{"txn-queue": idsList}})
+			logf("WARNING: purging from document %s/%v %s (keeping %d pending)", collection, tdoc.DocId, missingInfo(idsToRemove), countToKeep)
+			err := c.UpdateId(tdoc.DocId, M{"$pullAll": M{"txn-queue": idsToRemove}})
 			if err != nil {
-				return fmt.Errorf("error purging missing transaction %v: %v", idsList, err)
+				return fmt.Errorf("cannot remove from %s/%v %s: %v", collection, tdoc.DocId, missingInfo(idsToRemove), err)
 			}
 		}
 		if err := iter.Close(); err != nil {
@@ -458,26 +427,65 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 		TxnIds []string "txn-queue"
 	}
 
-	iter := r.sc.Find(nil).Select(bson.M{"_id": 1, "txn-queue": 1}).Iter()
+	iter := r.sc.Find(nil).Select(M{"_id": 1, "txn-queue": 1}).Iter()
 	var stdoc StashTDoc
 	for iter.Next(&stdoc) {
+		idsToRemove = idsToRemove[:0]
+		countToKeep := 0
 		for _, fullTxnId := range stdoc.TxnIds {
-			txnId := bson.ObjectIdHex(fullTxnId[:24])
-			if found[txnId] {
-				continue
+			if cache.isPending(fullTxnId) {
+				countToKeep++
+			} else {
+				idsToRemove = append(idsToRemove, fullTxnId)
 			}
-			if r.tc.FindId(txnId).One(nil) == nil {
-				found[txnId] = true
-				continue
-			}
-			logf("WARNING: purging from stash document %s/%v the missing transaction id %s", stdoc.Id.C, stdoc.Id.Id, txnId)
-			err := r.sc.UpdateId(stdoc.Id, M{"$pull": M{"txn-queue": M{"$regex": "^" + txnId.Hex() + "_*"}}})
-			if err != nil {
-				return fmt.Errorf("error purging missing transaction %s: %v", txnId.Hex(), err)
-			}
+		}
+		logf("WARNING: purging from stash document %s/%v %s (keeping %d pending)", stdoc.Id.C, stdoc.Id.Id, missingInfo(idsToRemove), countToKeep)
+		err := r.sc.UpdateId(stdoc.Id, M{"$pullAll": M{"txn-queue": idsToRemove}})
+		if err != nil {
+			return fmt.Errorf("cannot remove from %s/%v %s: %v", stdoc.Id.C, stdoc.Id.Id, missingInfo(idsToRemove), err)
 		}
 	}
 	return iter.Close()
+}
+
+func missingInfo(ids []string) string {
+	if len(ids) < 5 {
+		return fmt.Sprintf("the missing transaction ids %v", ids)
+	}
+	return fmt.Sprintf("%d missing transaction ids", len(ids))
+}
+
+type txnsCache struct {
+	pending map[bson.ObjectId]bool
+	tc      *mgo.Collection
+}
+
+func newTxnsCache(tc *mgo.Collection) *txnsCache {
+	return &txnsCache{
+		pending: make(map[bson.ObjectId]bool),
+		tc:      tc,
+	}
+}
+
+// isPending reports whether the given transaction id (as found in
+// a txn-queue field) represents a currently pending transaction.
+func (c *txnsCache) isPending(id string) bool {
+	if len(id) < 24 {
+		logf("WARNING: invalid id %q", id)
+		return false
+	}
+	txnId := bson.ObjectIdHex(id[:24])
+	isPending, ok := c.pending[txnId]
+	if ok {
+		return isPending
+	}
+	var txnDoc transaction
+	err := c.tc.FindId(txnId).Select(bson.D{{"_id", 1}, {"s", 1}}).One(&txnDoc)
+	if err == nil {
+		isPending = txnDoc.State != taborted && txnDoc.State != tapplied
+	}
+	c.pending[txnId] = isPending
+	return isPending
 }
 
 func (r *Runner) load(id bson.ObjectId) (*transaction, error) {
