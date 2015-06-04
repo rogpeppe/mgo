@@ -385,11 +385,9 @@ func (r *Runner) PurgeMissing(collections ...string) error {
 	type TDoc struct {
 		Id       interface{} "_id"
 		TxnQueue []string    "txn-queue"
-ions
 	}
 
 	cache := newTxnsCache(r.tc)
-	colls := make(map[string]bool)
 
 	var idsToRemove []string
 	sort.Strings(collections)
@@ -430,6 +428,7 @@ ions
 	iter := r.sc.Find(nil).Select(M{"_id": 1, "txn-queue": 1}).Iter()
 	var stdoc StashTDoc
 	for iter.Next(&stdoc) {
+		logf("got stdoc %#v", stdoc)
 		idsToRemove = idsToRemove[:0]
 		countToKeep := 0
 		for _, fullTxnId := range stdoc.TxnQueue {
@@ -448,7 +447,7 @@ ions
 	if err := iter.Close(); err != nil {
 		return fmt.Errorf("transaction stash iteration error: %v", err)
 	}
-	return iter.Close()
+	return nil
 }
 
 func missingInfo(ids []string) string {
